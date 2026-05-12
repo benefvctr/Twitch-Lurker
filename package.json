@@ -1,0 +1,42 @@
+{
+  "name": "twitch-lurker",
+  "version": "0.1.0",
+  "description": "Auto-opens Twitch streams in a hidden Firefox to maintain watch streaks",
+  "author": "Benefvctr",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benefvctr/Twitch-Lurker.git"
+  },
+  "homepage": "https://github.com/benefvctr/Twitch-Lurker#readme",
+  "bugs": {
+    "url": "https://github.com/benefvctr/Twitch-Lurker/issues"
+  },
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5174 && electron .\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "validate:extension": "node scripts/validate-extension.js",
+    "validate:audio": "node scripts/validate-audio-mute.js",
+    "validate:watch": "node scripts/validate-watch-time.js",
+    "build:renderer": "vite build",
+    "prebuild": "node scripts/link-playwright.js",
+    "build": "npm run build:renderer && electron-builder --win"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.0.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.0",
+    "vitest": "^2.0.0",
+    "wait-on": "^8.0.0"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

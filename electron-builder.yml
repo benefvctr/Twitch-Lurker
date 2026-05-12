@@ -1,0 +1,38 @@
+appId: com.twitchlurker.app
+productName: TwitchLurker
+directories:
+  output: dist/installer
+  buildResources: assets
+files:
+  - src/main/**/*
+  - src/preload/**/*
+  - dist/renderer/**/*
+  - package.json
+  - "!tests/**"
+  - "!scripts/**"
+extraResources:
+  - from: assets
+    to: assets
+    filter:
+      - "**/*"
+  - from: bin
+    to: bin
+    filter:
+      - "nircmd.exe"
+  - from: ms-playwright/firefox-1511
+    to: ms-playwright/firefox-1511
+    filter:
+      - "**/*"
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+# publish config goes here when setting up GitHub Releases (add "repository" to package.json first)
+# publish:
+#   provider: github
