@@ -1,17 +1,8 @@
 {
   "name": "twitch-lurker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Auto-opens Twitch streams in a hidden Firefox to maintain watch streaks",
   "author": "Benefvctr",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/benefvctr/Twitch-Lurker.git"
-  },
-  "homepage": "https://github.com/benefvctr/Twitch-Lurker#readme",
-  "bugs": {
-    "url": "https://github.com/benefvctr/Twitch-Lurker/issues"
-  },
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",

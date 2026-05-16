@@ -16,6 +16,8 @@ function resolveNircmdPath() {
   return path.resolve(__dirname, '..', '..', 'bin', 'nircmd.exe');
 }
 
+const PERIODIC_RESTART_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 class Coordinator extends EventEmitter {
   constructor({ configPath }) {
     super();
@@ -27,6 +29,7 @@ class Coordinator extends EventEmitter {
     this._nircmdPath = nircmdPath;
     this.running = false;
     this.lastErrors = new Map();   // channel -> error msg
+    this._periodicRestartTimer = null;
   }
 
   getStatus() {
@@ -68,6 +71,7 @@ class Coordinator extends EventEmitter {
     this.browser.on('tab-opened', () => this.emit('status-changed'));
     this.browser.on('tab-closed', () => this.emit('status-changed'));
     this.browser.on('crashed', () => this._handleBrowserCrash());
+    this.browser.on('restart-requested', () => this._handleBrowserCrash());
 
     await this.browser.start();
     this.browser.startWatchdog();
@@ -91,10 +95,21 @@ class Coordinator extends EventEmitter {
     this.running = true;
     this.emit('started');
     this.emit('status-changed');
+
+    // Schedule periodic restart every 6 hours to prevent tab accumulation
+    this._periodicRestartTimer = setInterval(async () => {
+      if (!this.running) return;
+      this.emit('warning', { msg: 'Periodic 6h restart: recycling browser to prevent tab accumulation' });
+      await this._handleBrowserCrash();
+    }, PERIODIC_RESTART_MS);
   }
 
   async stop() {
     this.running = false;
+    if (this._periodicRestartTimer) {
+      clearInterval(this._periodicRestartTimer);
+      this._periodicRestartTimer = null;
+    }
     if (this.detector) { this.detector.stop(); this.detector = null; }
     if (this.muter) this.muter.stop();
     if (this.browser) {

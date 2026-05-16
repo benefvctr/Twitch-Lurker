@@ -5,7 +5,8 @@ const DEFAULTS = {
   channels: [],
   pollIntervalSec: 60,
   firefoxProfileSourcePath: null,
-  lurkerProfilePath: null
+  lurkerProfilePath: null,
+  firstRunComplete: false
 };
 
 class ConfigStore {

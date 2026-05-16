@@ -16,10 +16,9 @@ describe('ConfigStore', () => {
   it('returns defaults when no config file exists', () => {
     const store = new ConfigStore(path.join(tmpDir, 'config.json'));
     const cfg = store.read();
-    expect(cfg.channels).toEqual([
-      'CoolDee__', 'CoolestJonas', 'KinderCSGO', 'Hyxu_', 'Squib_Channel', 'SkidMercs'
-    ]);
+    expect(cfg.channels).toEqual([]);
     expect(cfg.pollIntervalSec).toBe(60);
+    expect(cfg.firstRunComplete).toBe(false);
   });
 
   it('persists writes and reads back the same value', () => {

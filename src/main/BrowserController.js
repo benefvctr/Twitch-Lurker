@@ -207,9 +207,43 @@ foreach ($pid_ in $lurkerPids) {
     } catch { /* */ }
   }
 
+  requestRestart() {
+    this.emit('restart-requested');
+  }
+
   startWatchdog() {
     if (this._watchdogTimer) return;
     const tick = async () => {
+      if (!this.context) return;
+
+      // --- Hard cap: too many pages forces a full restart ---
+      let allPages;
+      try {
+        allPages = this.context.pages();
+      } catch {
+        return;
+      }
+      if (allPages.length > 20) {
+        this.emit('warning', { msg: `Page count ${allPages.length} exceeds hard cap of 20; requesting restart` });
+        this.requestRestart();
+        return;
+      }
+
+      // --- Sweep: close untracked pages with a twitch channel slug ---
+      const trackedChannels = new Set([...this.tabs.keys()].map(c => c.toLowerCase()));
+      for (const page of allPages) {
+        if (page.isClosed()) continue;
+        const url = page.url();
+        // Skip blank/transient pages
+        if (!url || url === 'about:blank' || url === '') continue;
+        const slug = this._extractChannelFromUrl(url);
+        // Only close pages that belong to a twitch channel that we are NOT tracking
+        if (slug && !trackedChannels.has(slug)) {
+          try { await page.close(); } catch { /* */ }
+        }
+      }
+
+      // --- Original watchdog: check tracked tabs for stalls ---
       for (const [channel, page] of this.tabs) {
         try {
           if (page.isClosed()) {

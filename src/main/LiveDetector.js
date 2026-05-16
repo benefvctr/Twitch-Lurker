@@ -10,6 +10,7 @@ class LiveDetector extends EventEmitter {
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
     this.state = new Map();   // channel -> 'live' | 'offline' | 'unknown'
     this.timers = new Map();
+    this._failCounts = new Map(); // channel -> consecutive failure count
     this._running = false;
   }
 
@@ -18,6 +19,7 @@ class LiveDetector extends EventEmitter {
     this._running = true;
     for (const ch of this.channels) {
       this.state.set(ch, 'unknown');
+      this._failCounts.set(ch, 0);
       this._scheduleNext(ch, 0);
     }
   }
@@ -32,6 +34,7 @@ class LiveDetector extends EventEmitter {
     const wasRunning = this._running;
     this.stop();
     this.channels = [...channels];
+    this._failCounts.clear();
     if (wasRunning) this.start();
   }
 
@@ -52,6 +55,8 @@ class LiveDetector extends EventEmitter {
       const html = await res.text();
       const next = parseLiveState(html);
       const prev = this.state.get(channel);
+      // Reset failure count on success
+      this._failCounts.set(channel, 0);
       if (prev !== next) {
         this.state.set(channel, next);
         if (prev === 'unknown') {
@@ -66,7 +71,16 @@ class LiveDetector extends EventEmitter {
       if (this.listenerCount('error') > 0) {
         this.emit('error', { channel, error: e });
       }
-      // do not change state on failure
+      // Track consecutive failures; after 5, reset state to 'unknown'
+      const fails = (this._failCounts.get(channel) ?? 0) + 1;
+      this._failCounts.set(channel, fails);
+      if (fails >= 5 && this.state.get(channel) !== 'unknown') {
+        this.state.set(channel, 'unknown');
+        // Emit a neutral 'state-reset' for observability; does not trigger tab open/close
+        if (this.listenerCount('state-reset') > 0) {
+          this.emit('state-reset', { channel, failCount: fails });
+        }
+      }
     }
 
     if (!this._running) return;

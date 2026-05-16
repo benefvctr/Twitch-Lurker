@@ -1,8 +1,9 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Notification, shell } = require('electron');
 const path = require('path');
 const { Coordinator } = require('./Coordinator.js');
 const { createTray } = require('./tray.js');
 const { ProfileCloner } = require('./ProfileCloner.js');
+const { ConfigStore } = require('./ConfigStore.js');
 
 // In dev, __dirname is src/main and PROJECT_ROOT is the repo root.
 // When packaged, app.getAppPath() returns the asar root (same structure inside the archive).
@@ -78,6 +79,9 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('status:get', () => coordinator.getStatus());
+  ipcMain.handle('config:get', () => coordinator.configStore.read());
+  ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:open-external', (_e, url) => shell.openExternal(url));
   ipcMain.handle('lifecycle:start', () => coordinator.start());
   ipcMain.handle('lifecycle:stop', () => coordinator.stop());
   ipcMain.handle('channels:get', () => coordinator.configStore.read().channels);
@@ -94,6 +98,49 @@ app.whenReady().then(() => {
     cloner.clone({ force: true });
     return { ok: true };
   });
+
+  ipcMain.handle('setup:detect-firefox', async () => {
+    try {
+      const profilePath = ProfileCloner.findDefaultFirefoxProfile();
+      return { found: true, path: profilePath, error: null };
+    } catch (e) {
+      return { found: false, path: null, error: e.message };
+    }
+  });
+
+  ipcMain.handle('setup:clone-profile', async () => {
+    try {
+      const cfg = coordinator.configStore.read();
+      const sourcePath = cfg.firefoxProfileSourcePath ?? ProfileCloner.findDefaultFirefoxProfile();
+      let lurkerPath = cfg.lurkerProfilePath;
+      if (!lurkerPath) {
+        lurkerPath = path.join(process.env.APPDATA, 'twitch-lurker', 'firefox-profile');
+        coordinator.configStore.write({ lurkerProfilePath: lurkerPath });
+      }
+      if (!cfg.firefoxProfileSourcePath) {
+        coordinator.configStore.write({ firefoxProfileSourcePath: sourcePath });
+      }
+      const cloner = new ProfileCloner({ sourcePath, destPath: lurkerPath });
+      cloner.clone({ force: false });
+      return { ok: true, error: null };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('setup:complete', () => {
+    coordinator.configStore.write({ firstRunComplete: true });
+    return { ok: true };
+  });
+
+  // First-launch notification (shown once, before wizard completes)
+  const launchCfg = coordinator.configStore.read();
+  if (!launchCfg.firstRunComplete && Notification.isSupported()) {
+    new Notification({
+      title: 'TwitchLurker',
+      body: 'TwitchLurker is running in your system tray. Click the tray icon to configure.'
+    }).show();
+  }
 
   createWindow();
   pushStatus();

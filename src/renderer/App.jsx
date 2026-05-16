@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { ChannelEditor } from './ChannelEditor.jsx';
+import { SetupWizard } from './SetupWizard.jsx';
 
 function SysStatusPill({ running, channelCount }) {
   let cls, label;
@@ -36,21 +37,140 @@ function LiveBadge({ live }) {
   );
 }
 
-export function App() {
-  const [status, setStatus] = useState({ running: false, channels: [] });
-  const [view, setView] = useState('status');
+function AboutModal({ onClose }) {
+  const [version, setVersion] = useState('...');
 
   useEffect(() => {
-    window.lurker.getStatus().then(setStatus);
-    return window.lurker.onStatusChanged(setStatus);
+    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.0'));
   }, []);
 
-  const handleToggle = () => {
-    status.running ? window.lurker.stop() : window.lurker.start();
+  const openRepo = () => {
+    window.lurker.openExternal('https://github.com/benefvctr/Twitch-Lurker');
   };
 
   return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">
+            LURKER<span className="slash">//</span>OBS
+          </span>
+          <button className="modal-close" onClick={onClose}>X</button>
+        </div>
+        <div className="modal-sep">{'─'.repeat(32)}</div>
+        <div className="modal-body">
+          <div className="modal-version">v{version}</div>
+          <p className="modal-desc">
+            Auto-opens Twitch streams in a hidden Firefox to maintain watch streaks and accrue
+            channel points. Single-user personal utility.
+          </p>
+          <button className="wizard-link-btn modal-repo-link" onClick={openRepo}>
+            github.com/benefvctr/Twitch-Lurker
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function App() {
+  const [status, setStatus] = useState({ running: false, channels: [] });
+  const [config, setConfig] = useState(null);
+  const [view, setView] = useState('status');
+  const [isStarting, setIsStarting] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [startError, setStartError] = useState(null);
+  const [showAbout, setShowAbout] = useState(false);
+
+  const loadConfig = useCallback(async () => {
+    const cfg = await window.lurker.getConfig();
+    setConfig(cfg);
+  }, []);
+
+  useEffect(() => {
+    window.lurker.getStatus().then(setStatus);
+    loadConfig();
+    return window.lurker.onStatusChanged((s) => {
+      setStatus(s);
+      // Clear starting/stopping when we get a confirmed running state
+      if (s.running) {
+        setIsStarting(false);
+      } else {
+        setIsStopping(false);
+      }
+    });
+  }, [loadConfig]);
+
+  const handleStart = async () => {
+    setIsStarting(true);
+    setStartError(null);
+    try {
+      await window.lurker.start();
+    } catch (e) {
+      setStartError(e?.message ?? String(e));
+      setIsStarting(false);
+    }
+  };
+
+  const handleStop = async () => {
+    setIsStopping(true);
+    try {
+      await window.lurker.stop();
+    } catch {
+      setIsStopping(false);
+    }
+  };
+
+  const handleToggle = () => {
+    if (status.running) {
+      handleStop();
+    } else {
+      handleStart();
+    }
+  };
+
+  const handleSetupDone = async () => {
+    await loadConfig();
+  };
+
+  // Show setup wizard for first-time users
+  if (config === null) {
+    // Still loading config
+    return (
+      <div className="app">
+        <div className="empty-state" style={{ marginTop: '80px' }}>LOADING...</div>
+      </div>
+    );
+  }
+
+  if (!config.firstRunComplete) {
+    return (
+      <div className="app">
+        <SetupWizard onDone={handleSetupDone} />
+      </div>
+    );
+  }
+
+  const toggleLabel = status.running
+    ? (isStopping ? '[ STOPPING... ]' : '[ STOP ]')
+    : (isStarting ? '[ STARTING... ]' : '[ START ]');
+
+  const toggleDisabled = isStarting || isStopping;
+
+  return (
     <div className="app">
+      {/* ---- Error banner ---- */}
+      {startError && (
+        <div className="error-banner">
+          <span className="error-banner-icon">!</span>
+          <span className="error-banner-msg">{startError}</span>
+          <button className="error-banner-close" onClick={() => setStartError(null)}>X</button>
+        </div>
+      )}
+
+      {/* ---- About modal ---- */}
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+
       {/* ---- Header ---- */}
       <header className="app-header">
         <div className="brand">
@@ -75,6 +195,13 @@ export function App() {
           >
             CHANNELS
           </button>
+          <button
+            className="nav-btn about-btn"
+            onClick={() => setShowAbout(true)}
+            title="About"
+          >
+            ?
+          </button>
         </nav>
       </header>
 
@@ -83,10 +210,11 @@ export function App() {
         <div className="view">
           <div className="controls">
             <button
-              className={`btn-toggle ${status.running ? 'stop' : 'start'}`}
+              className={`btn-toggle ${status.running ? 'stop' : 'start'}${toggleDisabled ? ' btn-toggle--loading' : ''}`}
               onClick={handleToggle}
+              disabled={toggleDisabled}
             >
-              {status.running ? '[ STOP ]' : '[ START ]'}
+              {toggleLabel}
             </button>
             <button
               className="btn-secondary"
