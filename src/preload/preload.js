@@ -19,5 +19,7 @@ contextBridge.exposeInMainWorld('lurker', {
     const handler = (_e, status) => cb(status);
     ipcRenderer.on('status:changed', handler);
     return () => ipcRenderer.removeListener('status:changed', handler);
-  }
+  },
+  getLogPath: () => ipcRenderer.invoke('log:get-path'),
+  openLog: () => ipcRenderer.invoke('log:open')
 });

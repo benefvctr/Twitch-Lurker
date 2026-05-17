@@ -39,9 +39,11 @@ function LiveBadge({ live }) {
 
 function AboutModal({ onClose }) {
   const [version, setVersion] = useState('...');
+  const [logPath, setLogPath] = useState(null);
 
   useEffect(() => {
-    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.0'));
+    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.1'));
+    window.lurker.getLogPath().then(setLogPath).catch(() => setLogPath(null));
   }, []);
 
   const openRepo = () => {
@@ -67,6 +69,15 @@ function AboutModal({ onClose }) {
           <button className="wizard-link-btn modal-repo-link" onClick={openRepo}>
             github.com/benefvctr/Twitch-Lurker
           </button>
+          {logPath && (
+            <div className="modal-log-row">
+              <div className="modal-log-label">LOG FILE</div>
+              <div className="modal-log-path">{logPath}</div>
+              <button className="modal-log-btn" onClick={() => window.lurker.openLog()}>
+                OPEN LOG FOLDER
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -80,6 +91,7 @@ export function App() {
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [startError, setStartError] = useState(null);
+  const [errorExpanded, setErrorExpanded] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
   const loadConfig = useCallback(async () => {
@@ -104,6 +116,7 @@ export function App() {
   const handleStart = async () => {
     setIsStarting(true);
     setStartError(null);
+    setErrorExpanded(false);
     try {
       await window.lurker.start();
     } catch (e) {
@@ -161,10 +174,39 @@ export function App() {
     <div className="app">
       {/* ---- Error banner ---- */}
       {startError && (
-        <div className="error-banner">
+        <div className={`error-banner${errorExpanded ? ' error-banner--expanded' : ''}`}>
           <span className="error-banner-icon">!</span>
-          <span className="error-banner-msg">{startError}</span>
-          <button className="error-banner-close" onClick={() => setStartError(null)}>X</button>
+          <div className="error-banner-body">
+            {errorExpanded ? (
+              <div className="error-banner-full">{startError}</div>
+            ) : (
+              <span className="error-banner-msg">{startError}</span>
+            )}
+          </div>
+          <div className="error-banner-actions">
+            <button
+              className="error-banner-action"
+              onClick={() => setErrorExpanded(x => !x)}
+              title={errorExpanded ? 'collapse' : 'expand'}
+            >
+              {errorExpanded ? '[collapse]' : '[expand]'}
+            </button>
+            <button
+              className="error-banner-action"
+              onClick={() => navigator.clipboard.writeText(startError)}
+              title="copy error to clipboard"
+            >
+              [copy]
+            </button>
+            <button
+              className="error-banner-action"
+              onClick={() => window.lurker.openLog()}
+              title="open log file in Explorer"
+            >
+              [log]
+            </button>
+            <button className="error-banner-close" onClick={() => { setStartError(null); setErrorExpanded(false); }}>X</button>
+          </div>
         </div>
       )}
 

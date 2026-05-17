@@ -1083,7 +1083,7 @@ body {
 
 .error-banner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 14px;
   background: rgba(224, 90, 90, 0.12);
@@ -1097,13 +1097,58 @@ body {
   font-weight: 700;
   font-size: 13px;
   flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.error-banner-body {
+  flex: 1;
+  min-width: 0;
 }
 
 .error-banner-msg {
-  flex: 1;
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.error-banner-full {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(224, 90, 90, 0.3) transparent;
+  line-height: 1.55;
+  padding-right: 4px;
+}
+
+.error-banner-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.error-banner-action {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: transparent;
+  border: 1px solid rgba(224, 90, 90, 0.35);
+  color: rgba(224, 90, 90, 0.75);
+  padding: 2px 5px;
+  cursor: pointer;
+  border-radius: 2px;
+  flex-shrink: 0;
+  transition: color 0.12s, border-color 0.12s;
+  line-height: 1.4;
+}
+
+.error-banner-action:hover {
+  color: var(--red);
+  border-color: var(--red);
 }
 
 .error-banner-close {
@@ -1118,6 +1163,7 @@ body {
   border-radius: 2px;
   flex-shrink: 0;
   transition: border-color 0.12s;
+  line-height: 1.4;
 }
 
 .error-banner-close:hover {
@@ -1233,5 +1279,55 @@ body {
   width: 24px;
   text-align: center;
   padding: 4px;
+}
+
+/* Log path row in About modal */
+.modal-log-row {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-log-label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.modal-log-path {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  border-radius: 2px;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.modal-log-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  background: rgba(255, 176, 0, 0.06);
+  border: 1px solid rgba(255, 176, 0, 0.35);
+  color: var(--amber);
+  padding: 6px 12px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background 0.15s, border-color 0.15s;
+  line-height: 1;
+  align-self: flex-start;
+}
+
+.modal-log-btn:hover {
+  background: rgba(255, 176, 0, 0.14);
+  border-color: var(--amber);
 }
 

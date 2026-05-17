@@ -1,6 +1,6 @@
 {
   "name": "twitch-lurker",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Auto-opens Twitch streams in a hidden Firefox to maintain watch streaks",
   "author": "Benefvctr",
   "main": "src/main/index.js",

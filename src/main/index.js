@@ -1,9 +1,13 @@
 const { app, BrowserWindow, ipcMain, Notification, shell } = require('electron');
 const path = require('path');
+const Logger = require('./Logger.js');
 const { Coordinator } = require('./Coordinator.js');
 const { createTray } = require('./tray.js');
 const { ProfileCloner } = require('./ProfileCloner.js');
 const { ConfigStore } = require('./ConfigStore.js');
+
+process.on('uncaughtException', e => Logger.error('uncaughtException', e));
+process.on('unhandledRejection', e => Logger.error('unhandledRejection', e instanceof Error ? e : new Error(String(e))));
 
 // In dev, __dirname is src/main and PROJECT_ROOT is the repo root.
 // When packaged, app.getAppPath() returns the asar root (same structure inside the archive).
@@ -66,37 +70,65 @@ function pushStatus() {
 }
 
 app.whenReady().then(() => {
+  Logger.init();
+
   coordinator = new Coordinator({ configPath: CONFIG_PATH });
   coordinator.on('status-changed', pushStatus);
-  coordinator.on('warning', (w) => console.warn('[lurker]', w));
+  coordinator.on('warning', (w) => Logger.warn(w));
 
   tray = createTray({
     assetsDir: ASSETS_DIR,
     onShow: createWindow,
-    onStart: () => coordinator.start().catch(e => console.error(e)),
-    onStop:  () => coordinator.stop().catch(e => console.error(e)),
+    onStart: () => coordinator.start().catch(e => Logger.error('tray onStart failed', e)),
+    onStop:  () => coordinator.stop().catch(e => Logger.error('tray onStop failed', e)),
     onQuit:  () => { app.exit(0); }
   });
 
-  ipcMain.handle('status:get', () => coordinator.getStatus());
-  ipcMain.handle('config:get', () => coordinator.configStore.read());
-  ipcMain.handle('app:version', () => app.getVersion());
-  ipcMain.handle('app:open-external', (_e, url) => shell.openExternal(url));
-  ipcMain.handle('lifecycle:start', () => coordinator.start());
-  ipcMain.handle('lifecycle:stop', () => coordinator.stop());
-  ipcMain.handle('channels:get', () => coordinator.configStore.read().channels);
-  ipcMain.handle('channels:set', (_e, channels) => coordinator.setChannels(channels));
+  ipcMain.handle('status:get', async () => {
+    try { return coordinator.getStatus(); }
+    catch (e) { Logger.error('IPC status:get failed', e); throw e; }
+  });
+  ipcMain.handle('config:get', async () => {
+    try { return coordinator.configStore.read(); }
+    catch (e) { Logger.error('IPC config:get failed', e); throw e; }
+  });
+  ipcMain.handle('app:version', async () => {
+    try { return app.getVersion(); }
+    catch (e) { Logger.error('IPC app:version failed', e); throw e; }
+  });
+  ipcMain.handle('app:open-external', async (_e, url) => {
+    try { return shell.openExternal(url); }
+    catch (e) { Logger.error('IPC app:open-external failed', e); throw e; }
+  });
+  ipcMain.handle('lifecycle:start', async () => {
+    try { return await coordinator.start(); }
+    catch (e) { Logger.error('IPC lifecycle:start failed', e); throw e; }
+  });
+  ipcMain.handle('lifecycle:stop', async () => {
+    try { return await coordinator.stop(); }
+    catch (e) { Logger.error('IPC lifecycle:stop failed', e); throw e; }
+  });
+  ipcMain.handle('channels:get', async () => {
+    try { return coordinator.configStore.read().channels; }
+    catch (e) { Logger.error('IPC channels:get failed', e); throw e; }
+  });
+  ipcMain.handle('channels:set', async (_e, channels) => {
+    try { return await coordinator.setChannels(channels); }
+    catch (e) { Logger.error('IPC channels:set failed', e); throw e; }
+  });
   ipcMain.handle('profile:refresh', async () => {
-    if (coordinator.running) {
-      throw new Error('Stop the app before refreshing the profile (Firefox holds files open).');
-    }
-    const cfg = coordinator.configStore.read();
-    const cloner = new ProfileCloner({
-      sourcePath: cfg.firefoxProfileSourcePath ?? ProfileCloner.findDefaultFirefoxProfile(),
-      destPath: cfg.lurkerProfilePath
-    });
-    cloner.clone({ force: true });
-    return { ok: true };
+    try {
+      if (coordinator.running) {
+        throw new Error('Stop the app before refreshing the profile (Firefox holds files open).');
+      }
+      const cfg = coordinator.configStore.read();
+      const cloner = new ProfileCloner({
+        sourcePath: cfg.firefoxProfileSourcePath ?? ProfileCloner.findDefaultFirefoxProfile(),
+        destPath: cfg.lurkerProfilePath
+      });
+      cloner.clone({ force: true });
+      return { ok: true };
+    } catch (e) { Logger.error('IPC profile:refresh failed', e); throw e; }
   });
 
   ipcMain.handle('setup:detect-firefox', async () => {
@@ -104,6 +136,7 @@ app.whenReady().then(() => {
       const profilePath = ProfileCloner.findDefaultFirefoxProfile();
       return { found: true, path: profilePath, error: null };
     } catch (e) {
+      Logger.warn('setup:detect-firefox: ' + e.message);
       return { found: false, path: null, error: e.message };
     }
   });
@@ -124,13 +157,22 @@ app.whenReady().then(() => {
       cloner.clone({ force: false });
       return { ok: true, error: null };
     } catch (e) {
+      Logger.error('IPC setup:clone-profile failed', e);
       return { ok: false, error: e.message };
     }
   });
 
-  ipcMain.handle('setup:complete', () => {
-    coordinator.configStore.write({ firstRunComplete: true });
-    return { ok: true };
+  ipcMain.handle('setup:complete', async () => {
+    try {
+      coordinator.configStore.write({ firstRunComplete: true });
+      return { ok: true };
+    } catch (e) { Logger.error('IPC setup:complete failed', e); throw e; }
+  });
+
+  ipcMain.handle('log:get-path', () => Logger.getLogPath());
+  ipcMain.handle('log:open', () => {
+    const p = Logger.getLogPath();
+    if (p) shell.showItemInFolder(p);
   });
 
   // First-launch notification (shown once, before wizard completes)
