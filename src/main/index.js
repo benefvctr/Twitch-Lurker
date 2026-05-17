@@ -1,5 +1,15 @@
 const { app, BrowserWindow, ipcMain, Notification, shell } = require('electron');
 const path = require('path');
+
+// IMPORTANT: PLAYWRIGHT_BROWSERS_PATH must be set BEFORE any module that
+// transitively requires 'playwright' is loaded. Playwright reads this env
+// var at require-time and caches the path. Setting it later (e.g. inside
+// app.whenReady) is too late — Playwright already resolved the default
+// %LOCALAPPDATA%/ms-playwright location, which is empty on fresh installs.
+if (app.isPackaged) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.resourcesPath, 'ms-playwright');
+}
+
 const Logger = require('./Logger.js');
 const { Coordinator } = require('./Coordinator.js');
 const { createTray } = require('./tray.js');
@@ -17,11 +27,6 @@ const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json');
 const ASSETS_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'assets')
   : path.join(PROJECT_ROOT, 'assets');
-
-// Set PLAYWRIGHT_BROWSERS_PATH so Playwright finds the bundled Firefox.
-if (app.isPackaged) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.resourcesPath, 'ms-playwright');
-}
 
 let mainWindow = null;
 let tray = null;
