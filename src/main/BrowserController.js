@@ -94,16 +94,18 @@ foreach ($pid_ in $lurkerPids) {
   }
 
   async openChannel(channel) {
-    if (this.tabs.has(channel)) return;
+    // BUG 7: normalize at the BrowserController boundary so Map keys are always lowercase
+    const ch = channel.toLowerCase();
+    if (this.tabs.has(ch)) return;
     if (!this.context) throw new Error('BrowserController not started');
 
-    const url = `https://www.twitch.tv/${channel}`;
+    const url = `https://www.twitch.tv/${ch}`;
 
     // Use context.newPage() directly for serialized, predictable tab creation.
     // Firefox prefs (browser.link.open_newwindow=3) coalesce new pages into tabs in same window.
     const page = await this.context.newPage();
-    this.tabs.set(channel, page);
-    page._lurkerExpectedChannel = channel.toLowerCase();
+    this.tabs.set(ch, page);
+    page._lurkerExpectedChannel = ch;
     page._lurkerOpening = true;
 
     page.on('framenavigated', (frame) => {
@@ -118,9 +120,9 @@ foreach ($pid_ in $lurkerPids) {
       const gated = await this._checkGated(page);
       if (gated) {
         page._lurkerOpening = false;
-        this.tabs.delete(channel);
+        this.tabs.delete(ch);
         try { await page.close(); } catch { /* */ }
-        this.emit('tab-skipped', { channel, reason: 'gated' });
+        this.emit('tab-skipped', { channel: ch, reason: 'gated' });
         return;
       }
 
@@ -129,21 +131,23 @@ foreach ($pid_ in $lurkerPids) {
       await this._setLowestQuality(page);
       await this._ensureUnmuted(page);
       this._minimizeLurkerWindows();
-      this.emit('tab-opened', channel);
+      this.emit('tab-opened', ch);
     } catch (e) {
       page._lurkerOpening = false;
-      this.tabs.delete(channel);
-      this.emit('tab-error', { channel, error: e });
+      this.tabs.delete(ch);
+      this.emit('tab-error', { channel: ch, error: e });
       try { await page.close(); } catch { /* */ }
     }
   }
 
   async closeChannel(channel) {
-    const page = this.tabs.get(channel);
+    // BUG 7: normalize at boundary
+    const ch = channel.toLowerCase();
+    const page = this.tabs.get(ch);
     if (!page) return;
-    this.tabs.delete(channel);
+    this.tabs.delete(ch);
     try { await page.close(); } catch { /* */ }
-    this.emit('tab-closed', channel);
+    this.emit('tab-closed', ch);
   }
 
   async _dismissMatureGate(page) {

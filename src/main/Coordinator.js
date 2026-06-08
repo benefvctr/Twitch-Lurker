@@ -35,27 +35,42 @@ class Coordinator extends EventEmitter {
     this.muter = new AudioMuter({ nircmdPath });
     this._nircmdPath = nircmdPath;
     this.running = false;
-    this.lastErrors = new Map();   // channel -> error msg
+    this.lastErrors = new Map();   // channel (lowercase) -> error msg
     this._periodicRestartTimer = null;
     this._restartInProgress = false;
     this._consecutiveRestartFailures = 0;
-    this._tabRetries = new Map();  // channel -> retry count
+    this._tabRetries = new Map();  // channel (lowercase) -> retry count
+    // BUG 4: track user-initiated stop so restart attempts can honor it
+    this._userStopped = false;
+    // BUG 5: guard against concurrent start() calls
+    this._startInProgress = false;
+    // NICE 5: track pending tab-retry timeout handles for clean shutdown
+    this._pendingRetries = new Set();
   }
 
   getStatus() {
     const cfg = this.configStore.read();
     const channels = cfg.channels.map(ch => ({
       name: ch,
-      live: this.detector?.getState(ch) ?? 'unknown',
-      tabOpen: this.browser?.openChannels().includes(ch) ?? false,
-      lastError: this.lastErrors.get(ch) ?? null,
-      lastUpdated: this.detector?.getLastUpdated(ch) ?? null
+      live: this.detector?.getState(ch.toLowerCase()) ?? 'unknown',
+      // BUG 7: use lowercase key for lookup; display name stays user-entered
+      tabOpen: this.browser?.openChannels().includes(ch.toLowerCase()) ?? false,
+      lastError: this.lastErrors.get(ch.toLowerCase()) ?? null,
+      lastUpdated: this.detector?.getLastUpdated(ch.toLowerCase()) ?? null
     }));
     return { running: this.running, channels };
   }
 
   async start() {
     if (this.running) return;
+    // BUG 5: guard against concurrent calls that both pass the running check
+    if (this._startInProgress) return;
+    this._startInProgress = true;
+    // BUG 4: clear user-stopped flag when user explicitly starts
+    this._userStopped = false;
+    // BUG 6: reset failure counter on manual start so give-up threshold is fresh
+    this._consecutiveRestartFailures = 0;
+
     const cfg = this.configStore.read();
 
     // Resolve profile paths
@@ -72,15 +87,17 @@ class Coordinator extends EventEmitter {
 
     try {
       // #1: Reap stale lurker firefox processes before launch
-      await this._reapStaleLurkerFirefox(lurkerPath);
+      await this._reapStaleLurkerFirefox();
 
       const cloner = new ProfileCloner({ sourcePath, destPath: lurkerPath });
       await cloner.clone();   // no-op if already cloned, but always clears transient files
 
       this.browser = new BrowserController({ profilePath: lurkerPath, nircmdPath: this._nircmdPath });
-      this.browser.setWatchedChannels(cfg.channels);
+      // BUG 7: pass lowercase channel names to BrowserController
+      this.browser.setWatchedChannels(cfg.channels.map(c => c.toLowerCase()));
 
       this.browser.on('tab-error', ({ channel, error }) => {
+        // BrowserController emits lowercase channel names
         this.lastErrors.set(channel, error.message);
         this.emit('status-changed');
         // #6: Schedule retry if detector still says channel is live
@@ -94,8 +111,15 @@ class Coordinator extends EventEmitter {
         this.emit('status-changed');
       });
       this.browser.on('tab-closed', () => this.emit('status-changed'));
-      this.browser.on('crashed', () => this._handleBrowserCrash());
-      this.browser.on('restart-requested', () => this._handleBrowserCrash());
+      // BUG 1: event handlers check this.running before calling crash handler
+      this.browser.on('crashed', () => {
+        if (!this.running || this._userStopped) return;
+        this._handleBrowserCrash();
+      });
+      this.browser.on('restart-requested', () => {
+        if (!this.running || this._userStopped) return;
+        this._handleBrowserCrash();
+      });
 
       // #6: Also retry on tab-died from watchdog
       this.browser.on('tab-died', (channel) => {
@@ -129,13 +153,18 @@ class Coordinator extends EventEmitter {
         this.emit('warning', { msg: 'Could not find lurker Firefox PID for audio mute' });
       }
 
-      this.detector = new LiveDetector(cfg.channels, { intervalSec: cfg.pollIntervalSec });
+      // BUG 7: pass lowercase channel names to LiveDetector
+      const lowerChannels = cfg.channels.map(c => c.toLowerCase());
+      this.detector = new LiveDetector(lowerChannels, { intervalSec: cfg.pollIntervalSec });
       this.detector.on('online', (ch) => { this.browser.openChannel(ch); this.emit('status-changed'); });
       this.detector.on('offline', (ch) => { this.browser.closeChannel(ch); this.emit('status-changed'); });
       this.detector.on('error', ({ channel, error }) => this.lastErrors.set(channel, error.message));
-      // #3: Clear lastError on successful poll
+      // #3: Clear lastError on successful poll — but preserve sticky GATED marker (BUG 3)
       this.detector.on('polled', (ch) => {
-        this.lastErrors.delete(ch);
+        // GATED is a terminal state until restart; do not wipe it on routine poll success
+        if (this.lastErrors.get(ch) !== 'GATED') {
+          this.lastErrors.delete(ch);
+        }
       });
       this.detector.start();
 
@@ -145,7 +174,8 @@ class Coordinator extends EventEmitter {
         if (!this.running) return;
         try {
           this.emit('warning', { msg: 'Periodic 6h restart: recycling browser to prevent tab accumulation' });
-          await this._handleBrowserCrash();
+          // Periodic restarts go through _handleBrowserCrash directly (not event path)
+          this._handleBrowserCrash();
         } catch (e) {
           this.emit('lifecycle-error', { phase: 'periodic-restart', error: e.message });
         }
@@ -156,6 +186,8 @@ class Coordinator extends EventEmitter {
       this.emit('status-changed');
     } catch (err) {
       // #2: Transactional rollback on start failure
+      // NICE 2: also stop muter during rollback
+      if (this.muter) this.muter.stop();
       await this.browser?.stop().catch(() => {});
       this.browser = null;
       if (this.detector) { this.detector.stop(); this.detector = null; }
@@ -166,15 +198,23 @@ class Coordinator extends EventEmitter {
       this.running = false;
       this.emit('lifecycle-error', { phase: 'start', error: err.message });
       throw err;
+    } finally {
+      // BUG 5: always release the start-in-progress guard
+      this._startInProgress = false;
     }
   }
 
   async stop() {
+    // BUG 4: mark that the user explicitly stopped so in-flight restarts abort
+    this._userStopped = true;
     this.running = false;
     if (this._periodicRestartTimer) {
       clearInterval(this._periodicRestartTimer);
       this._periodicRestartTimer = null;
     }
+    // NICE 5: cancel all pending tab-retry timeouts
+    for (const handle of this._pendingRetries) clearTimeout(handle);
+    this._pendingRetries.clear();
     if (this.detector) { this.detector.stop(); this.detector = null; }
     if (this.muter) this.muter.stop();
     if (this.browser) {
@@ -189,13 +229,44 @@ class Coordinator extends EventEmitter {
     this.emit('status-changed');
   }
 
-  async _handleBrowserCrash() {
-    if (!this.running) return;
-    // #4: Idempotent crash handler
-    if (this._restartInProgress) return;
+  /**
+   * BUG 2: Reopen a single channel's tab without a full restart.
+   * Used when the tab navigated to login (session expired) — the browser is
+   * still healthy, we just need to close and re-open the channel tab.
+   */
+  async reopenChannel(channel) {
+    const ch = channel.toLowerCase();
+    this.lastErrors.delete(ch);
+    if (this.browser) {
+      await this.browser.closeChannel(ch).catch(() => {});
+      await this.browser.openChannel(ch).catch(() => {});
+    }
+    this.emit('status-changed');
+  }
 
+  /**
+   * BUG 1: Entry point from event handlers (crashed / restart-requested).
+   * Only called when running=true and not user-stopped (callers check that).
+   * Delegates to _attemptRestart which bypasses the running guard.
+   */
+  _handleBrowserCrash() {
+    // Idempotent: only one restart sequence at a time
+    if (this._restartInProgress) return;
+    this._attemptRestart();
+  }
+
+  /**
+   * BUG 1: Actual restart logic. Does NOT check this.running — that's intentional.
+   * The stop() call inside will set running=false, and we need to be able to
+   * call start() after that. Scheduled retries call this directly (not _handleBrowserCrash)
+   * so they also bypass the running guard while still respecting _userStopped.
+   */
+  async _attemptRestart() {
     this._restartInProgress = true;
     try {
+      // BUG 4: if user stopped while we were queued, abort
+      if (this._userStopped) return;
+
       this.emit('warning', { msg: 'Browser crashed; respawning' });
 
       // Stop watchdog first to prevent re-entrant crash events
@@ -203,14 +274,22 @@ class Coordinator extends EventEmitter {
 
       await this.stop();
 
+      // BUG 4: check again after stop() which may have been called concurrently
+      if (this._userStopped) return;
+
       // Settle delay before restart
       await new Promise(r => setTimeout(r, CRASH_SETTLE_DELAY_MS));
+
+      if (this._userStopped) return;
 
       const cfg = this.configStore.read();
       const lurkerPath = cfg.lurkerProfilePath;
 
       let lastErr = null;
       for (let attempt = 1; attempt <= CRASH_RESTART_ATTEMPTS; attempt++) {
+        // BUG 4: abort mid-loop if user stopped
+        if (this._userStopped) return;
+
         try {
           if (attempt === 1) {
             // Attempt 1: plain restart
@@ -218,14 +297,14 @@ class Coordinator extends EventEmitter {
           } else if (attempt === 2) {
             // Attempt 2: reap stale firefox first
             Logger.warn({ msg: `Crash restart attempt ${attempt}: reap stale firefox then restart` });
-            await this._reapStaleLurkerFirefox(lurkerPath);
+            await this._reapStaleLurkerFirefox();
           } else if (attempt === 3) {
             // Attempt 3: reclone profile, reap, then start
             Logger.warn({ msg: `Crash restart attempt ${attempt}: force-reclone profile then restart` });
             const sourcePath = cfg.firefoxProfileSourcePath ?? ProfileCloner.findDefaultFirefoxProfile();
             const cloner = new ProfileCloner({ sourcePath, destPath: lurkerPath });
             await cloner.clone({ force: true });
-            await this._reapStaleLurkerFirefox(lurkerPath);
+            await this._reapStaleLurkerFirefox();
           }
 
           await this.start();
@@ -243,6 +322,9 @@ class Coordinator extends EventEmitter {
       }
 
       if (lastErr) {
+        // BUG 4: don't increment counter or schedule if user stopped
+        if (this._userStopped) return;
+
         this._consecutiveRestartFailures++;
         const n = this._consecutiveRestartFailures;
 
@@ -254,7 +336,9 @@ class Coordinator extends EventEmitter {
           // Exponential backoff: 1min * 2^n, capped at 30min
           const delay = Math.min(60000 * Math.pow(2, n - 1), 30 * 60 * 1000);
           Logger.warn({ msg: `Scheduling retry in ${Math.round(delay / 1000)}s (failure ${n})` });
-          setTimeout(() => this._handleBrowserCrash(), delay);
+          // BUG 1: scheduled retry calls _attemptRestart directly, bypassing the
+          // running guard in _handleBrowserCrash — that's intentional
+          setTimeout(() => this._attemptRestart(), delay);
         }
       }
     } finally {
@@ -266,7 +350,9 @@ class Coordinator extends EventEmitter {
     const retries = this._tabRetries.get(channel) ?? 0;
     if (retries >= TAB_RETRY_LIMIT) return;
 
-    setTimeout(() => {
+    // NICE 5: track handle so stop() can cancel pending retries
+    const handle = setTimeout(() => {
+      this._pendingRetries.delete(handle);
       // Only retry if: still running, detector says live, tab not already open
       if (
         this.running &&
@@ -276,22 +362,24 @@ class Coordinator extends EventEmitter {
         this.browser?.openChannel(channel).catch(() => {});
       }
     }, TAB_RETRY_DELAY_MS);
+    this._pendingRetries.add(handle);
 
     this._tabRetries.set(channel, retries + 1);
   }
 
   setChannels(channels) {
     this.configStore.write({ channels });
-    // #3: Prune removed channels from lastErrors
-    const newSet = new Set(channels);
+    // BUG 7: use lowercase keys consistently in internal maps
+    const newSet = new Set(channels.map(c => c.toLowerCase()));
     for (const ch of [...this.lastErrors.keys()]) {
       if (!newSet.has(ch)) this.lastErrors.delete(ch);
     }
     for (const ch of [...this._tabRetries.keys()]) {
       if (!newSet.has(ch)) this._tabRetries.delete(ch);
     }
-    if (this.detector) this.detector.setChannels(channels);
-    if (this.browser) this.browser.setWatchedChannels(channels);
+    if (this.detector) this.detector.setChannels([...newSet]);
+    // BUG 7: pass lowercase names to BrowserController
+    if (this.browser) this.browser.setWatchedChannels([...newSet]);
     this.emit('status-changed');
   }
 
@@ -313,6 +401,7 @@ class Coordinator extends EventEmitter {
    * #1: Kill any stale lurker Firefox processes from a previous session.
    * Runs a PowerShell WMI query, Stop-Process -Force each found PID,
    * then polls up to 3s for them to disappear.
+   * NICE 3: lurkerPath param removed — PowerShell filter hardcodes 'twitch-lurker' pattern.
    */
   async _reapStaleLurkerFirefox() {
     return new Promise((resolve) => {

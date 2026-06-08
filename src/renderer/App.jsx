@@ -73,7 +73,7 @@ function AboutModal({ onClose }) {
   const [logPath, setLogPath] = useState(null);
 
   useEffect(() => {
-    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.3'));
+    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.4'));
     window.lurker.getLogPath().then(setLogPath).catch(() => setLogPath(null));
   }, []);
 
@@ -125,6 +125,8 @@ export function App() {
   const [errorExpanded, setErrorExpanded] = useState(true);
   const [showAbout, setShowAbout] = useState(false);
   const [loginRequired, setLoginRequired] = useState(false);
+  // BUG 2: track which channel triggered login-required so reopenChannel can target it
+  const [loginRequiredChannel, setLoginRequiredChannel] = useState(null);
 
   const loadConfig = useCallback(async () => {
     const cfg = await window.lurker.getConfig();
@@ -159,9 +161,10 @@ export function App() {
       setIsStarting(false);
     });
 
-    // #12: Login required banner
-    const unsubLoginRequired = window.lurker.onLoginRequired(() => {
+    // #12: Login required banner — store channel for targeted reopen (BUG 2)
+    const unsubLoginRequired = window.lurker.onLoginRequired(({ channel }) => {
       setLoginRequired(true);
+      setLoginRequiredChannel(channel ?? null);
     });
 
     return () => {
@@ -311,7 +314,13 @@ export function App() {
           <div className="error-banner-actions">
             <button
               className="error-banner-action"
-              onClick={() => { setLoginRequired(false); handleRetry(); }}
+              onClick={async () => {
+                setLoginRequired(false);
+                // BUG 2: reopen only the affected channel tab (not a full restart)
+                if (loginRequiredChannel) {
+                  try { await window.lurker.reopenChannel(loginRequiredChannel); } catch { /* ignore */ }
+                }
+              }}
               disabled={isStarting}
             >
               [retry]

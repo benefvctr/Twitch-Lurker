@@ -37,6 +37,8 @@ class LiveDetector extends EventEmitter {
     this.channels = [...channels];
     this._failCounts.clear();
     this.state.clear();
+    // NICE 1: clear _lastUpdated to prevent stale timestamps leaking into new channel set
+    this._lastUpdated.clear();
     if (wasRunning) this.start();
   }
 

@@ -144,6 +144,14 @@ app.whenReady().then(() => {
       throw new Error('Start failed: ' + e.message);
     }
   });
+  // BUG 2: Reopen a single channel tab (login-required recovery path)
+  ipcMain.handle('lifecycle:reopen-channel', async (_e, channel) => {
+    try { return await coordinator.reopenChannel(channel); }
+    catch (e) {
+      Logger.error('IPC lifecycle:reopen-channel failed', e);
+      throw new Error('Reopen failed: ' + e.message);
+    }
+  });
   ipcMain.handle('channels:get', async () => {
     try { return coordinator.configStore.read().channels; }
     catch (e) { Logger.error('IPC channels:get failed', e); throw e; }

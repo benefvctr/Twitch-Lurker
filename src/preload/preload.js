@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('lurker', {
   start: () => ipcRenderer.invoke('lifecycle:start'),
   stop: () => ipcRenderer.invoke('lifecycle:stop'),
   retryStart: () => ipcRenderer.invoke('lifecycle:retry-start'),
+  reopenChannel: (channel) => ipcRenderer.invoke('lifecycle:reopen-channel', channel),
   getChannels: () => ipcRenderer.invoke('channels:get'),
   setChannels: (channels) => ipcRenderer.invoke('channels:set', channels),
   refreshProfile: () => ipcRenderer.invoke('profile:refresh'),

@@ -461,6 +461,20 @@ body {
 }
 .live-badge.is-unknown { color: var(--amber); }
 
+/* STALE: detector hasn't produced a fresh poll in 5+ min */
+.live-badge.is-stale .live-dot {
+  background: var(--text-dim);
+  animation: none;
+}
+.live-badge.is-stale { color: var(--text-dim); }
+
+/* GATED: subscriber-only / login-required stream — terminal state, no retry */
+.live-badge.is-gated .live-dot {
+  background: var(--red);
+  animation: none;
+}
+.live-badge.is-gated { color: var(--red); }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; }
   50%       { opacity: 0.7; box-shadow: 0 0 0 3px transparent; }
@@ -1168,6 +1182,32 @@ body {
 
 .error-banner-close:hover {
   border-color: var(--red);
+}
+
+/* Warning banner variant (amber) — used for login-required which is not a hard error */
+.error-banner--warning {
+  background: rgba(255, 176, 0, 0.10);
+  border-bottom-color: rgba(255, 176, 0, 0.35);
+  color: var(--amber);
+}
+
+.error-banner--warning .error-banner-action {
+  border-color: rgba(255, 176, 0, 0.35);
+  color: rgba(255, 176, 0, 0.75);
+}
+
+.error-banner--warning .error-banner-action:hover {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.error-banner--warning .error-banner-close {
+  border-color: rgba(255, 176, 0, 0.4);
+  color: var(--amber);
+}
+
+.error-banner--warning .error-banner-close:hover {
+  border-color: var(--amber);
 }
 
 /* ============================================================
