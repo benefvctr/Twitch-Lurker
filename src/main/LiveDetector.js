@@ -11,6 +11,7 @@ class LiveDetector extends EventEmitter {
     this.state = new Map();   // channel -> 'live' | 'offline' | 'unknown'
     this.timers = new Map();
     this._failCounts = new Map(); // channel -> consecutive failure count
+    this._lastUpdated = new Map(); // channel -> timestamp (ms) of last successful poll
     this._running = false;
   }
 
@@ -35,11 +36,16 @@ class LiveDetector extends EventEmitter {
     this.stop();
     this.channels = [...channels];
     this._failCounts.clear();
+    this.state.clear();
     if (wasRunning) this.start();
   }
 
   getState(channel) {
     return this.state.get(channel) ?? 'unknown';
+  }
+
+  getLastUpdated(channel) {
+    return this._lastUpdated.get(channel) ?? null;
   }
 
   _scheduleNext(channel, delayMs) {
@@ -57,6 +63,10 @@ class LiveDetector extends EventEmitter {
       const prev = this.state.get(channel);
       // Reset failure count on success
       this._failCounts.set(channel, 0);
+      // Track last successful poll timestamp
+      this._lastUpdated.set(channel, Date.now());
+      // Emit 'polled' on every successful tick (whether state changed or not)
+      this.emit('polled', channel);
       if (prev !== next) {
         this.state.set(channel, next);
         if (prev === 'unknown') {

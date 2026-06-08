@@ -2,6 +2,10 @@ const { firefox } = require('playwright');
 const { execFile } = require('child_process');
 const { EventEmitter } = require('events');
 
+// Paths/hosts that should be preserved (not closed by watchdog page sweep)
+const PRESERVED_PATH_PREFIXES = ['/login', '/signup', '/directory', '/settings', '/p/'];
+const PRESERVED_HOSTS = ['passport.twitch.tv', 'id.twitch.tv'];
+
 class BrowserController extends EventEmitter {
   constructor({ profilePath, nircmdPath }) {
     super();
@@ -66,7 +70,7 @@ foreach ($pid_ in $lurkerPids) {
     });
     // Coordinator looks up the PID via Win32_Process; browser().process() doesn't exist on persistent contexts in Playwright 1.48
     this.emit('started');
-    this.startWatchdog();
+    // NOTE: watchdog is started by Coordinator after start() returns
   }
 
   async stop() {
@@ -94,39 +98,43 @@ foreach ($pid_ in $lurkerPids) {
     if (!this.context) throw new Error('BrowserController not started');
 
     const url = `https://www.twitch.tv/${channel}`;
-    let page;
-    // For subsequent tabs, use window.open from an existing page so Firefox
-    // adds a tab to the same window instead of opening a new top-level window.
-    const existing = [...this.tabs.values()][0];
-    if (existing && !existing.isClosed()) {
-      const newPagePromise = this.context.waitForEvent('page', { timeout: 10000 }).catch(() => null);
-      await existing.evaluate((u) => window.open(u, '_blank'), url);
-      page = await newPagePromise;
-      if (!page) {
-        // Fallback: window.open got blocked or didn't fire. Use newPage (separate window).
-        page = await this.context.newPage();
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      }
-    } else {
-      page = await this.context.newPage();
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    }
 
+    // Use context.newPage() directly for serialized, predictable tab creation.
+    // Firefox prefs (browser.link.open_newwindow=3) coalesce new pages into tabs in same window.
+    const page = await this.context.newPage();
     this.tabs.set(channel, page);
-    page._lurkerExpectedChannel = channel;
+    page._lurkerExpectedChannel = channel.toLowerCase();
+    page._lurkerOpening = true;
+
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) this._handleNavigation(page, frame.url());
     });
+
     try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await this._dismissMatureGate(page);
+
+      // Check for subscriber/login gating before declaring tab-error
+      const gated = await this._checkGated(page);
+      if (gated) {
+        page._lurkerOpening = false;
+        this.tabs.delete(channel);
+        try { await page.close(); } catch { /* */ }
+        this.emit('tab-skipped', { channel, reason: 'gated' });
+        return;
+      }
+
       await page.waitForSelector('video', { timeout: 30000 });
+      page._lurkerOpening = false;
       await this._setLowestQuality(page);
       await this._ensureUnmuted(page);
       this._minimizeLurkerWindows();
       this.emit('tab-opened', channel);
     } catch (e) {
+      page._lurkerOpening = false;
+      this.tabs.delete(channel);
       this.emit('tab-error', { channel, error: e });
-      await this.closeChannel(channel);
+      try { await page.close(); } catch { /* */ }
     }
   }
 
@@ -139,11 +147,48 @@ foreach ($pid_ in $lurkerPids) {
   }
 
   async _dismissMatureGate(page) {
+    // Try multiple selectors for mature/age gate variants; allow 8s total window
+    const selectors = [
+      'button[data-a-target="content-classification-gate-overlay-start-watching-button"]',
+      'button[data-a-target="content-classification-gate-overlay-watch-anyway-button"]',
+      'button[data-a-target="player-overlay-mature-accept"]'
+    ];
+
+    // Try data-a-target selectors first (fast, specific)
+    for (const sel of selectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 2000 });
+        await page.click(sel);
+        return; // clicked one, done
+      } catch { /* not present, try next */ }
+    }
+
+    // Fallback: role-based button match for variants not covered above
     try {
-      const sel = 'button[data-a-target="content-classification-gate-overlay-start-watching-button"]';
-      await page.waitForSelector(sel, { timeout: 4000 });
-      await page.click(sel);
+      await page.getByRole('button', { name: /start watching|watch anyway|continue|i.?m 18/i })
+        .click({ timeout: 1500 });
     } catch { /* not present, fine */ }
+  }
+
+  async _checkGated(page) {
+    // Check for subscriber-only or login-required text after gate dismiss attempt
+    try {
+      const visible = await page.locator('text=/subscribe to watch|log in to watch/i').first().isVisible();
+      return visible;
+    } catch {
+      return false;
+    }
+  }
+
+  _isPreservedPage(url) {
+    try {
+      const u = new URL(url);
+      if (PRESERVED_HOSTS.includes(u.hostname)) return true;
+      for (const prefix of PRESERVED_PATH_PREFIXES) {
+        if (u.pathname.startsWith(prefix)) return true;
+      }
+    } catch { /* invalid url */ }
+    return false;
   }
 
   _extractChannelFromUrl(url) {
@@ -159,6 +204,15 @@ foreach ($pid_ in $lurkerPids) {
   }
 
   _handleNavigation(page, url) {
+    // Suppress framenavigated events while the tab is still in the opening sequence
+    if (page._lurkerOpening) return;
+
+    // Detect login/auth redirect
+    if (this._isLoginUrl(url)) {
+      this.emit('login-required', { channel: page._lurkerExpectedChannel });
+      return;
+    }
+
     const newSlug = this._extractChannelFromUrl(url);
     const expected = page._lurkerExpectedChannel?.toLowerCase();
     if (!newSlug) return;            // non-channel page (settings, etc.)
@@ -169,7 +223,7 @@ foreach ($pid_ in $lurkerPids) {
       const oldChannel = page._lurkerExpectedChannel;
       this.tabs.delete(oldChannel);
       this.tabs.set(newSlug, page);
-      page._lurkerExpectedChannel = newSlug;
+      page._lurkerExpectedChannel = newSlug.toLowerCase();
       this.emit('tab-rebound', { from: oldChannel, to: newSlug });
     } else {
       // Not on watchlist — close
@@ -177,6 +231,15 @@ foreach ($pid_ in $lurkerPids) {
       this.emit('raid-out', { channel: ch, to: newSlug });
       this.closeChannel(ch);
     }
+  }
+
+  _isLoginUrl(url) {
+    try {
+      const u = new URL(url);
+      if (PRESERVED_HOSTS.includes(u.hostname)) return true;
+      if (u.pathname.startsWith('/login') || u.pathname.startsWith('/signup')) return true;
+    } catch { /* */ }
+    return false;
   }
 
   async _setLowestQuality(page) {
@@ -217,14 +280,18 @@ foreach ($pid_ in $lurkerPids) {
       if (!this.context) return;
 
       // --- Hard cap: too many pages forces a full restart ---
+      // Preserved pages (login/settings) are excluded from the count
       let allPages;
       try {
         allPages = this.context.pages();
       } catch {
         return;
       }
-      if (allPages.length > 20) {
-        this.emit('warning', { msg: `Page count ${allPages.length} exceeds hard cap of 20; requesting restart` });
+      const countablePages = allPages.filter(p => {
+        try { return !this._isPreservedPage(p.url()); } catch { return true; }
+      });
+      if (countablePages.length > 20) {
+        this.emit('warning', { msg: `Page count ${countablePages.length} exceeds hard cap of 20; requesting restart` });
         this.requestRestart();
         return;
       }
@@ -234,8 +301,9 @@ foreach ($pid_ in $lurkerPids) {
       for (const page of allPages) {
         if (page.isClosed()) continue;
         const url = page.url();
-        // Skip blank/transient pages
+        // Skip blank/transient pages and preserved pages (login, settings, etc.)
         if (!url || url === 'about:blank' || url === '') continue;
+        if (this._isPreservedPage(url)) continue;
         const slug = this._extractChannelFromUrl(url);
         // Only close pages that belong to a twitch channel that we are NOT tracking
         if (slug && !trackedChannels.has(slug)) {

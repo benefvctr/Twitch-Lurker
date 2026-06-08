@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('lurker', {
   getVersion: () => ipcRenderer.invoke('app:version'),
   start: () => ipcRenderer.invoke('lifecycle:start'),
   stop: () => ipcRenderer.invoke('lifecycle:stop'),
+  retryStart: () => ipcRenderer.invoke('lifecycle:retry-start'),
   getChannels: () => ipcRenderer.invoke('channels:get'),
   setChannels: (channels) => ipcRenderer.invoke('channels:set', channels),
   refreshProfile: () => ipcRenderer.invoke('profile:refresh'),
@@ -19,6 +20,21 @@ contextBridge.exposeInMainWorld('lurker', {
     const handler = (_e, status) => cb(status);
     ipcRenderer.on('status:changed', handler);
     return () => ipcRenderer.removeListener('status:changed', handler);
+  },
+  onLifecycleError: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('lifecycle:error', handler);
+    return () => ipcRenderer.removeListener('lifecycle:error', handler);
+  },
+  onGiveUp: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('lifecycle:give-up', handler);
+    return () => ipcRenderer.removeListener('lifecycle:give-up', handler);
+  },
+  onLoginRequired: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('lifecycle:login-required', handler);
+    return () => ipcRenderer.removeListener('lifecycle:login-required', handler);
   },
   getLogPath: () => ipcRenderer.invoke('log:get-path'),
   openLog: () => ipcRenderer.invoke('log:open')

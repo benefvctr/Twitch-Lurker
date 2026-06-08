@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { ChannelEditor } from './ChannelEditor.jsx';
 import { SetupWizard } from './SetupWizard.jsx';
 
+const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+
 function SysStatusPill({ running, channelCount }) {
   let cls, label;
   if (running) {
@@ -22,17 +24,46 @@ function SysStatusPill({ running, channelCount }) {
   );
 }
 
-function LiveBadge({ live }) {
-  const map = {
-    live:    { cls: 'live-badge is-live',    label: 'LIVE'    },
-    offline: { cls: 'live-badge is-offline', label: 'OFFLINE' },
-    unknown: { cls: 'live-badge is-unknown', label: 'WAIT'    },
-  };
-  const { cls, label } = map[live] ?? map.unknown;
+function LiveBadge({ live, lastUpdated }) {
+  // GATED: error state meaning subscriber-only/login-required
+  if (live === 'gated') {
+    return (
+      <span className="live-badge is-gated">
+        <span className="live-dot" />
+        GATED
+      </span>
+    );
+  }
+  if (live === 'live') {
+    return (
+      <span className="live-badge is-live">
+        <span className="live-dot" />
+        LIVE
+      </span>
+    );
+  }
+  if (live === 'offline') {
+    return (
+      <span className="live-badge is-offline">
+        <span className="live-dot" />
+        OFFLINE
+      </span>
+    );
+  }
+  // unknown: WAIT vs STALE based on lastUpdated
+  const isStale = lastUpdated != null && (Date.now() - lastUpdated) >= STALE_THRESHOLD_MS;
+  if (isStale) {
+    return (
+      <span className="live-badge is-stale">
+        <span className="live-dot" />
+        STALE
+      </span>
+    );
+  }
   return (
-    <span className={cls}>
+    <span className="live-badge is-unknown">
       <span className="live-dot" />
-      {label}
+      WAIT
     </span>
   );
 }
@@ -42,7 +73,7 @@ function AboutModal({ onClose }) {
   const [logPath, setLogPath] = useState(null);
 
   useEffect(() => {
-    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.1'));
+    window.lurker.getVersion().then(setVersion).catch(() => setVersion('0.2.3'));
     window.lurker.getLogPath().then(setLogPath).catch(() => setLogPath(null));
   }, []);
 
@@ -91,8 +122,9 @@ export function App() {
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [startError, setStartError] = useState(null);
-  const [errorExpanded, setErrorExpanded] = useState(false);
+  const [errorExpanded, setErrorExpanded] = useState(true);
   const [showAbout, setShowAbout] = useState(false);
+  const [loginRequired, setLoginRequired] = useState(false);
 
   const loadConfig = useCallback(async () => {
     const cfg = await window.lurker.getConfig();
@@ -102,25 +134,55 @@ export function App() {
   useEffect(() => {
     window.lurker.getStatus().then(setStatus);
     loadConfig();
-    return window.lurker.onStatusChanged((s) => {
+
+    const unsubStatus = window.lurker.onStatusChanged((s) => {
       setStatus(s);
       // Clear starting/stopping when we get a confirmed running state
       if (s.running) {
         setIsStarting(false);
+        // Clear error banner on successful start
+        setStartError(null);
+        setErrorExpanded(true);
       } else {
         setIsStopping(false);
       }
     });
+
+    // #9: Subscribe to lifecycle errors pushed from main process
+    const unsubLifecycleError = window.lurker.onLifecycleError((payload) => {
+      setStartError(payload.error ?? 'Unknown lifecycle error');
+      setIsStarting(false);
+    });
+
+    const unsubGiveUp = window.lurker.onGiveUp((payload) => {
+      setStartError(`Self-heal gave up after repeated failures: ${payload.error ?? ''}`);
+      setIsStarting(false);
+    });
+
+    // #12: Login required banner
+    const unsubLoginRequired = window.lurker.onLoginRequired(() => {
+      setLoginRequired(true);
+    });
+
+    return () => {
+      unsubStatus();
+      unsubLifecycleError();
+      unsubGiveUp();
+      unsubLoginRequired();
+    };
   }, [loadConfig]);
 
   const handleStart = async () => {
     setIsStarting(true);
     setStartError(null);
-    setErrorExpanded(false);
+    setErrorExpanded(true);
     try {
       await window.lurker.start();
     } catch (e) {
-      setStartError(e?.message ?? String(e));
+      // #10: Strip IPC prefix from error messages
+      const raw = e?.message ?? String(e);
+      const msg = raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/, '');
+      setStartError(msg);
       setIsStarting(false);
     }
   };
@@ -131,6 +193,19 @@ export function App() {
       await window.lurker.stop();
     } catch {
       setIsStopping(false);
+    }
+  };
+
+  const handleRetry = async () => {
+    setIsStarting(true);
+    setStartError(null);
+    try {
+      await window.lurker.retryStart();
+    } catch (e) {
+      const raw = e?.message ?? String(e);
+      const msg = raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/, '');
+      setStartError(msg);
+      setIsStarting(false);
     }
   };
 
@@ -170,6 +245,12 @@ export function App() {
 
   const toggleDisabled = isStarting || isStopping;
 
+  // Derive GATED live state from lastError for channel row display
+  function getEffectiveLive(ch) {
+    if (ch.lastError === 'GATED') return 'gated';
+    return ch.live;
+  }
+
   return (
     <div className="app">
       {/* ---- Error banner ---- */}
@@ -184,6 +265,14 @@ export function App() {
             )}
           </div>
           <div className="error-banner-actions">
+            <button
+              className="error-banner-action"
+              onClick={handleRetry}
+              title="retry start"
+              disabled={isStarting}
+            >
+              [retry]
+            </button>
             <button
               className="error-banner-action"
               onClick={() => setErrorExpanded(x => !x)}
@@ -205,7 +294,29 @@ export function App() {
             >
               [log]
             </button>
-            <button className="error-banner-close" onClick={() => { setStartError(null); setErrorExpanded(false); }}>X</button>
+            <button className="error-banner-close" onClick={() => { setStartError(null); setErrorExpanded(true); }}>X</button>
+          </div>
+        </div>
+      )}
+
+      {/* ---- Login required sticky banner ---- */}
+      {loginRequired && (
+        <div className="error-banner error-banner--warning">
+          <span className="error-banner-icon">!</span>
+          <div className="error-banner-body">
+            <span className="error-banner-msg">
+              Twitch session expired. Sign in via the lurker Firefox and click Retry.
+            </span>
+          </div>
+          <div className="error-banner-actions">
+            <button
+              className="error-banner-action"
+              onClick={() => { setLoginRequired(false); handleRetry(); }}
+              disabled={isStarting}
+            >
+              [retry]
+            </button>
+            <button className="error-banner-close" onClick={() => setLoginRequired(false)}>X</button>
           </div>
         </div>
       )}
@@ -296,7 +407,7 @@ export function App() {
                     </td>
                     <td className="td-name">{c.name}</td>
                     <td className="td-live">
-                      <LiveBadge live={c.live} />
+                      <LiveBadge live={getEffectiveLive(c)} lastUpdated={c.lastUpdated} />
                     </td>
                     <td className={`td-tab${c.tabOpen ? ' is-open' : ''}`}>
                       {c.tabOpen ? 'OPEN' : '--'}

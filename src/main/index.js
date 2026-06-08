@@ -74,12 +74,32 @@ function pushStatus() {
   }
 }
 
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
 app.whenReady().then(() => {
   Logger.init();
 
   coordinator = new Coordinator({ configPath: CONFIG_PATH });
   coordinator.on('status-changed', pushStatus);
   coordinator.on('warning', (w) => Logger.warn(w));
+
+  // #9: Push lifecycle errors and give-up events to renderer
+  coordinator.on('lifecycle-error', (payload) => {
+    Logger.warn({ msg: 'lifecycle-error', ...payload });
+    sendToRenderer('lifecycle:error', payload);
+  });
+  coordinator.on('give-up', (payload) => {
+    Logger.warn({ msg: 'give-up', ...payload });
+    sendToRenderer('lifecycle:give-up', payload);
+  });
+  // #12: Forward login-required to renderer as sticky banner
+  coordinator.on('login-required', (payload) => {
+    sendToRenderer('lifecycle:login-required', payload);
+  });
 
   tray = createTray({
     assetsDir: ASSETS_DIR,
@@ -107,11 +127,22 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('lifecycle:start', async () => {
     try { return await coordinator.start(); }
-    catch (e) { Logger.error('IPC lifecycle:start failed', e); throw e; }
+    catch (e) {
+      Logger.error('IPC lifecycle:start failed', e);
+      throw new Error('Start failed: ' + e.message);
+    }
   });
   ipcMain.handle('lifecycle:stop', async () => {
     try { return await coordinator.stop(); }
     catch (e) { Logger.error('IPC lifecycle:stop failed', e); throw e; }
+  });
+  // #9: Retry start from renderer
+  ipcMain.handle('lifecycle:retry-start', async () => {
+    try { return await coordinator.start(); }
+    catch (e) {
+      Logger.error('IPC lifecycle:retry-start failed', e);
+      throw new Error('Start failed: ' + e.message);
+    }
   });
   ipcMain.handle('channels:get', async () => {
     try { return coordinator.configStore.read().channels; }
@@ -131,7 +162,7 @@ app.whenReady().then(() => {
         sourcePath: cfg.firefoxProfileSourcePath ?? ProfileCloner.findDefaultFirefoxProfile(),
         destPath: cfg.lurkerProfilePath
       });
-      cloner.clone({ force: true });
+      await cloner.clone({ force: true });
       return { ok: true };
     } catch (e) { Logger.error('IPC profile:refresh failed', e); throw e; }
   });
@@ -159,7 +190,7 @@ app.whenReady().then(() => {
         coordinator.configStore.write({ firefoxProfileSourcePath: sourcePath });
       }
       const cloner = new ProfileCloner({ sourcePath, destPath: lurkerPath });
-      cloner.clone({ force: false });
+      await cloner.clone({ force: false });
       return { ok: true, error: null };
     } catch (e) {
       Logger.error('IPC setup:clone-profile failed', e);

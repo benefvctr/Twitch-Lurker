@@ -1,6 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 
+const TOLERATED_UNLINK_CODES = ['EBUSY', 'EPERM', 'ENOENT'];
+
+function _sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 class ProfileCloner {
   constructor({ sourcePath, destPath }) {
     this.sourcePath = sourcePath;
@@ -35,10 +41,29 @@ class ProfileCloner {
     return fs.existsSync(this.destPath) && fs.existsSync(path.join(this.destPath, 'prefs.js'));
   }
 
-  clone({ force = false } = {}) {
+  async clone({ force = false } = {}) {
     let cloned = false;
     if (force && fs.existsSync(this.destPath)) {
-      fs.rmSync(this.destPath, { recursive: true, force: true });
+      // Retry helper: up to 3 attempts with 1s delay, tolerating EBUSY on intermediate attempts
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          fs.rmSync(this.destPath, { recursive: true, force: true });
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < 3 && e.code === 'EBUSY') {
+            await _sleep(1000);
+          } else if (attempt === 3) {
+            // On final failure, log warning and proceed (best-effort reclone)
+            console.warn(`[ProfileCloner] rmSync failed after 3 attempts: ${e.message} — proceeding anyway`);
+            lastErr = null; // don't re-throw, proceed
+          } else {
+            throw e; // non-EBUSY errors on intermediate attempts are fatal
+          }
+        }
+      }
     }
     if (!this.exists()) {
       this._copyDir(this.sourcePath, this.destPath);
@@ -92,7 +117,11 @@ class ProfileCloner {
     // Remove lock files (block re-launch) and compatibility.ini (triggers Firefox version warning)
     for (const f of ['parent.lock', 'lock', '.parentlock', 'compatibility.ini']) {
       const p = path.join(this.destPath, f);
-      if (fs.existsSync(p)) fs.unlinkSync(p);
+      try {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      } catch (e) {
+        if (!TOLERATED_UNLINK_CODES.includes(e.code)) throw e;
+      }
     }
   }
 
