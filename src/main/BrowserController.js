@@ -65,6 +65,16 @@ foreach ($pid_ in $lurkerPids) {
       args: ['-no-remote'],
       env: { ...process.env, MOZ_DISABLE_CONTENT_SANDBOX: '1' }
     });
+    // Seed Twitch's quality preference in localStorage BEFORE the page loads.
+    // Twitch's player JS reads this on init and picks the right quality with no
+    // UI interaction needed. Avoids the historic problem of clicking the wrong
+    // element in the quality submenu (e.g. landing on "Gift a Sub").
+    await this.context.addInitScript(() => {
+      try {
+        localStorage.setItem('video-quality', '{"default":"160p30"}');
+        localStorage.setItem('video-muted', '{"default":false}');
+      } catch { /* private/storage disabled — fine */ }
+    });
     this.context.on('close', () => {
       if (!this._stopping) this.emit('crashed');
     });
@@ -128,7 +138,8 @@ foreach ($pid_ in $lurkerPids) {
 
       await page.waitForSelector('video', { timeout: 30000 });
       page._lurkerOpening = false;
-      await this._setLowestQuality(page);
+      // Quality is set via the addInitScript localStorage seed in start();
+      // no menu navigation here — that historically misclicked "Gift a Sub".
       await this._ensureUnmuted(page);
       this._minimizeLurkerWindows();
       this.emit('tab-opened', ch);
@@ -244,36 +255,6 @@ foreach ($pid_ in $lurkerPids) {
       if (u.pathname.startsWith('/login') || u.pathname.startsWith('/signup')) return true;
     } catch { /* */ }
     return false;
-  }
-
-  async _setLowestQuality(page) {
-    try {
-      await page.click('[data-a-target="player-settings-button"]', { timeout: 5000 });
-      await page.waitForSelector('button[data-a-target="player-settings-menu-item-quality"]', { timeout: 5000 });
-      await page.click('button[data-a-target="player-settings-menu-item-quality"]');
-      await page.waitForTimeout(400);
-
-      // Click the visible menu items (role="menuitemradio") rather than the hidden
-      // <input type="radio"> elements. The radios are display:none / off-screen, so
-      // clicking them with force:true lands the click at coords (0,0) which sails
-      // through to whatever's underneath the player UI — historically the "Gift a Sub"
-      // button. The role="menuitemradio" divs are the actual visible/clickable surface.
-      const opts = await page.$$('[role="menuitemradio"]');
-      if (opts.length > 0) {
-        // Filter to options that are actually visible (the submenu may render a
-        // menuitemradio for the "auto" option above the quality list too).
-        const visible = [];
-        for (const o of opts) {
-          if (await o.isVisible().catch(() => false)) visible.push(o);
-        }
-        const target = (visible.length ? visible : opts).at(-1);
-        await target.click({ timeout: 3000 });
-      }
-      // Close settings menu by pressing Escape
-      await page.keyboard.press('Escape');
-    } catch (e) {
-      this.emit('warning', { msg: 'Could not set quality', error: e.message });
-    }
   }
 
   async _ensureUnmuted(page) {
