@@ -33,12 +33,24 @@ function write(level, msg) {
   else console.log(line.trim());
 }
 
-function info(msg)  { write('INFO', String(msg)); }
-function warn(msg)  { write('WARN', String(msg)); }
+function fmt(v) {
+  if (v == null) return String(v);
+  if (typeof v === 'string') return v;
+  if (v instanceof Error) return v.stack || v.message || String(v);
+  // Plain objects / arrays — JSON-stringify so we don't get '[object Object]'
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function info(msg)  { write('INFO', fmt(msg)); }
+function warn(msg)  { write('WARN', fmt(msg)); }
 function error(msg, err) {
-  let text = String(msg);
+  let text = fmt(msg);
   if (err) {
-    text += '\n' + (err.stack || err.message || String(err));
+    text += '\n' + (err.stack || err.message || fmt(err));
   }
   write('ERROR', text);
 }

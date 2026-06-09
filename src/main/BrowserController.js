@@ -252,10 +252,22 @@ foreach ($pid_ in $lurkerPids) {
       await page.waitForSelector('button[data-a-target="player-settings-menu-item-quality"]', { timeout: 5000 });
       await page.click('button[data-a-target="player-settings-menu-item-quality"]');
       await page.waitForTimeout(400);
-      const opts = await page.$$('input[name="player-settings-submenu-quality-option"]');
+
+      // Click the visible menu items (role="menuitemradio") rather than the hidden
+      // <input type="radio"> elements. The radios are display:none / off-screen, so
+      // clicking them with force:true lands the click at coords (0,0) which sails
+      // through to whatever's underneath the player UI — historically the "Gift a Sub"
+      // button. The role="menuitemradio" divs are the actual visible/clickable surface.
+      const opts = await page.$$('[role="menuitemradio"]');
       if (opts.length > 0) {
-        // Use force: true because Twitch sometimes overlays an element on top of the radio
-        await opts[opts.length - 1].click({ force: true, timeout: 3000 });
+        // Filter to options that are actually visible (the submenu may render a
+        // menuitemradio for the "auto" option above the quality list too).
+        const visible = [];
+        for (const o of opts) {
+          if (await o.isVisible().catch(() => false)) visible.push(o);
+        }
+        const target = (visible.length ? visible : opts).at(-1);
+        await target.click({ timeout: 3000 });
       }
       // Close settings menu by pressing Escape
       await page.keyboard.press('Escape');
