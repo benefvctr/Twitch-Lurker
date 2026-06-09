@@ -1,7 +1,10 @@
 const fs = require('fs');
 const path = require('path');
+const Logger = require('./Logger.js');
 
 const TOLERATED_UNLINK_CODES = ['EBUSY', 'EPERM', 'ENOENT'];
+// Lock files that block a fresh launchPersistentContext if left behind.
+const LOCK_FILES = ['parent.lock', 'lock', '.parentlock'];
 
 function _sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -114,13 +117,46 @@ class ProfileCloner {
   }
 
   _clearTransient() {
-    // Remove lock files (block re-launch) and compatibility.ini (triggers Firefox version warning)
-    for (const f of ['parent.lock', 'lock', '.parentlock', 'compatibility.ini']) {
-      const p = path.join(this.destPath, f);
+    // compatibility.ini only triggers a version warning — best-effort unlink is fine.
+    const p = path.join(this.destPath, 'compatibility.ini');
+    try {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch (e) {
+      if (!TOLERATED_UNLINK_CODES.includes(e.code)) throw e;
+    }
+
+    // Lock files are different: if any survive, the next launchPersistentContext
+    // inherits a locked profile and hangs until the 180s timeout. So we must
+    // VERIFY each one is actually gone, retry, and as a last resort rename it
+    // out of the way — and warn loudly if even that fails.
+    for (const f of LOCK_FILES) {
+      this._removeLockFile(path.join(this.destPath, f), f);
+    }
+  }
+
+  // Best-effort-but-verified removal of a single lock file.
+  _removeLockFile(p, name) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (!fs.existsSync(p)) return; // gone — success
       try {
-        if (fs.existsSync(p)) fs.unlinkSync(p);
+        fs.unlinkSync(p);
       } catch (e) {
         if (!TOLERATED_UNLINK_CODES.includes(e.code)) throw e;
+        // tolerated (EBUSY/EPERM) — fall through to verify/retry
+      }
+      if (!fs.existsSync(p)) return; // verified gone
+    }
+
+    // Still present after retries — rename it aside so Firefox can claim a fresh lock.
+    if (fs.existsSync(p)) {
+      const aside = `${p}.old`;
+      try {
+        try { if (fs.existsSync(aside)) fs.rmSync(aside, { force: true }); } catch { /* */ }
+        fs.renameSync(p, aside);
+        Logger.warn({ msg: `Profile lock '${name}' could not be deleted; renamed to ${name}.old`, path: p });
+      } catch (e) {
+        // Last resort failed — this is the condition that produces the launch hang.
+        Logger.warn({ msg: `Profile lock '${name}' is stuck and could not be cleared or renamed; next launch may time out`, path: p, error: e.message });
       }
     }
   }

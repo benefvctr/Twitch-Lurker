@@ -1,6 +1,16 @@
 const { firefox } = require('playwright');
 const { execFile } = require('child_process');
 const { EventEmitter } = require('events');
+const Logger = require('./Logger.js');
+const { reapLurkerFirefox } = require('./firefoxReaper.js');
+
+// Explicit launch timeout. Playwright's default is 180000ms; we raise it for
+// headroom + diagnostics, but the real cure for the chronic launch hang is the
+// process-tree reaper + lock verification — never this bump alone.
+const LAUNCH_TIMEOUT_MS = 300000;
+// Bound on context.close() so a hung close (common with many open tabs) can't
+// leave the old process holding the profile lock into the next launch.
+const CLOSE_TIMEOUT_MS = 10000;
 
 // Paths/hosts that should be preserved (not closed by watchdog page sweep)
 const PRESERVED_PATH_PREFIXES = ['/login', '/signup', '/directory', '/settings', '/p/'];
@@ -14,6 +24,10 @@ class BrowserController extends EventEmitter {
     this.context = null;
     this.tabs = new Map();   // channel -> Page
     this._stopping = false;
+    // Set the moment the context begins tearing down (close/crash) so openChannel
+    // doesn't try to create a page against a dying context (the "Target page,
+    // context or browser has been closed" burst).
+    this._contextClosing = false;
     this.watchedChannels = new Set();
     this._watchdogTimer = null;
     this.watchdogIntervalMs = 30000;
@@ -60,11 +74,19 @@ foreach ($pid_ in $lurkerPids) {
 
   async start() {
     this._stopping = false;
+    this._contextClosing = false;
+    // Instrumentation: prove where time goes (Juggler handshake vs. clone vs.
+    // close). Every production timeout being exactly 180000ms is what told us
+    // no custom timeout was set; this elapsed log confirms the fix in the next log.
+    const launchStart = Date.now();
+    // -no-remote is dropped from args: Playwright already passes it, and the
+    // duplicate showed up twice on the launch command line.
     this.context = await firefox.launchPersistentContext(this.profilePath, {
       headless: false,
-      args: ['-no-remote'],
+      timeout: LAUNCH_TIMEOUT_MS,
       env: { ...process.env, MOZ_DISABLE_CONTENT_SANDBOX: '1' }
     });
+    Logger.info({ msg: 'launchPersistentContext completed', elapsedMs: Date.now() - launchStart });
     // Seed Twitch's quality preference in localStorage BEFORE the page loads.
     // Twitch's player JS reads this on init and picks the right quality with no
     // UI interaction needed. Avoids the historic problem of clicking the wrong
@@ -76,9 +98,10 @@ foreach ($pid_ in $lurkerPids) {
       } catch { /* private/storage disabled — fine */ }
     });
     this.context.on('close', () => {
+      this._contextClosing = true;
       if (!this._stopping) this.emit('crashed');
     });
-    // Coordinator looks up the PID via Win32_Process; browser().process() doesn't exist on persistent contexts in Playwright 1.48
+    // Coordinator looks up the PID via Win32_Process; browser().process() doesn't exist on persistent contexts
     this.emit('started');
     // NOTE: watchdog is started by Coordinator after start() returns
   }
@@ -86,15 +109,44 @@ foreach ($pid_ in $lurkerPids) {
   async stop() {
     this.stopWatchdog();
     this._stopping = true;
-    if (this.context) {
-      try { await this.context.close(); } catch { /* */ }
-      this.context = null;
+    this._contextClosing = true;
+    const ctx = this.context;
+    // Null the handle up front so any concurrent openChannel bails immediately.
+    this.context = null;
+    if (ctx) {
+      // Bound context.close(): a bare close can hang indefinitely with many open
+      // tabs, and a hung close keeps the old Firefox — and its profile lock —
+      // alive into the next launch (the launchPersistentContext timeout).
+      const closeStart = Date.now();
+      let timer;
+      try {
+        await Promise.race([
+          ctx.close(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`context.close exceeded ${CLOSE_TIMEOUT_MS}ms`)), CLOSE_TIMEOUT_MS);
+          })
+        ]);
+        Logger.info({ msg: 'context.close completed', elapsedMs: Date.now() - closeStart });
+      } catch (e) {
+        // close hung — force-kill the lurker Firefox tree so the lock is released.
+        Logger.warn({ msg: 'context.close did not complete; force-killing lurker Firefox tree', error: e.message });
+        try {
+          const r = await reapLurkerFirefox();
+          Logger.warn({ msg: 'forced reap after hung close', killed: r.killed, remaining: r.remaining, clean: r.clean });
+        } catch (killErr) {
+          Logger.warn({ msg: 'forced reap after hung close failed', error: killErr.message });
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+      // Whether close resolved or we force-killed, the handle is gone and stop()
+      // always completes — so the next launch isn't blocked by a hung teardown.
     }
     this.tabs.clear();
   }
 
   getPid() {
-    // browser().process() doesn't exist on persistent contexts in Playwright 1.48.
+    // browser().process() doesn't exist on persistent contexts.
     // Coordinator uses _lookupLurkerPid via Win32_Process instead.
     return null;
   }
@@ -108,12 +160,18 @@ foreach ($pid_ in $lurkerPids) {
     const ch = channel.toLowerCase();
     if (this.tabs.has(ch)) return;
     if (!this.context) throw new Error('BrowserController not started');
+    // Guard against the teardown race: an `online` event can fire while the
+    // context is closing/restarting. Creating a page now throws "Target page,
+    // context or browser has been closed" — skip quietly; the restart will
+    // reopen live channels.
+    if (this._contextClosing || this._stopping) return;
 
     const url = `https://www.twitch.tv/${ch}`;
 
     // Use context.newPage() directly for serialized, predictable tab creation.
     // Firefox prefs (browser.link.open_newwindow=3) coalesce new pages into tabs in same window.
-    const page = await this.context.newPage();
+    const ctx = this.context;
+    const page = await ctx.newPage();
     this.tabs.set(ch, page);
     page._lurkerExpectedChannel = ch;
     page._lurkerOpening = true;

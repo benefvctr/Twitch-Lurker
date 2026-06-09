@@ -1,5 +1,5 @@
 const path = require('path');
-const { execSync, execFile } = require('child_process');
+const { execSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { app } = require('electron');
 const { ConfigStore } = require('./ConfigStore.js');
@@ -7,6 +7,7 @@ const { ProfileCloner } = require('./ProfileCloner.js');
 const { LiveDetector } = require('./LiveDetector.js');
 const { BrowserController } = require('./BrowserController.js');
 const { AudioMuter } = require('./AudioMuter.js');
+const { reapLurkerFirefox } = require('./firefoxReaper.js');
 const Logger = require('./Logger.js');
 
 // Resolve nircmd.exe once: use process.resourcesPath when packaged, dev bin/ otherwise.
@@ -21,7 +22,10 @@ const PERIODIC_RESTART_MS = 6 * 60 * 60 * 1000; // 6 hours
 const TAB_RETRY_LIMIT = 3;
 const TAB_RETRY_DELAY_MS = 30000;
 const CRASH_RESTART_ATTEMPTS = 3;
-const CRASH_SETTLE_DELAY_MS = 3000;
+// Time for Windows to release file handles / named pipes after the old session
+// dies before we relaunch. 3s was too short for a 24/7 app and left the profile
+// lock held into the next launch.
+const CRASH_SETTLE_DELAY_MS = 10000;
 const CRASH_RETRY_DELAY_MS = 5000;
 const MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -387,8 +391,11 @@ class Coordinator extends EventEmitter {
     try {
       // Filter Firefox processes by command-line containing the lurker profile path.
       // Use a path fragment that's unlikely to collide (e.g. 'twitch-lurker').
+      // Name = 'firefox.exe' filter is required: without it the query matches
+      // its own PowerShell process (whose command line contains the marker text)
+      // and can return that PID instead of Firefox's, breaking audio mute.
       const out = execSync(
-        `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*twitch-lurker*firefox-profile*' } | Select-Object -First 1 -ExpandProperty ProcessId"`,
+        `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name = 'firefox.exe'\\" | Where-Object { $_.CommandLine -like '*twitch-lurker*firefox-profile*' } | Select-Object -First 1 -ExpandProperty ProcessId"`,
         { encoding: 'utf8', timeout: 5000 }
       ).trim();
       return out ? parseInt(out, 10) : null;
@@ -398,49 +405,28 @@ class Coordinator extends EventEmitter {
   }
 
   /**
-   * #1: Kill any stale lurker Firefox processes from a previous session.
-   * Runs a PowerShell WMI query, Stop-Process -Force each found PID,
-   * then polls up to 3s for them to disappear.
-   * NICE 3: lurkerPath param removed — PowerShell filter hardcodes 'twitch-lurker' pattern.
+   * #1: Kill any stale lurker Firefox processes (and their full child tree) from
+   * a previous session before launching. This is the primary cure for the
+   * chronic launchPersistentContext timeout: a half-dead process tree keeps the
+   * profile locked (parent.lock / *.sqlite), and the new launch then stalls.
+   *
+   * Delegated to firefoxReaper.reapLurkerFirefox, which walks ParentProcessId to
+   * find content/gpu/rdd/socket children (they don't carry the profile marker),
+   * kills children-first, and verifies by PID. Called unconditionally before
+   * every launch via start(), so restart attempt 1 reaps too.
    */
   async _reapStaleLurkerFirefox() {
-    return new Promise((resolve) => {
-      const ps = `
-$procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*twitch-lurker*firefox-profile*' };
-$pids = $procs | Select-Object -ExpandProperty ProcessId;
-foreach ($pid_ in $pids) {
-  try { Stop-Process -Id $pid_ -Force -ErrorAction SilentlyContinue } catch {}
-}
-Write-Output ($pids -join ',')
-`;
-      execFile('powershell', ['-NoProfile', '-Command', ps], { timeout: 8000 }, (err, stdout) => {
-        const raw = (stdout ?? '').trim();
-        const killed = raw ? raw.split(',').filter(Boolean) : [];
-
-        if (killed.length === 0) {
-          resolve();
-          return;
-        }
-
-        this.emit('warning', { msg: `Reaped ${killed.length} stale lurker Firefox process(es)` });
-
-        // Poll up to 3s for processes to disappear
-        const deadline = Date.now() + 3000;
-        const poll = () => {
-          if (Date.now() >= deadline) { resolve(); return; }
-          try {
-            const checkOut = execSync(
-              `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*twitch-lurker*firefox-profile*' } | Measure-Object | Select-Object -ExpandProperty Count"`,
-              { encoding: 'utf8', timeout: 3000 }
-            ).trim();
-            const remaining = parseInt(checkOut, 10) || 0;
-            if (remaining === 0) { resolve(); return; }
-          } catch { /* ignore */ }
-          setTimeout(poll, 500);
-        };
-        setTimeout(poll, 500);
-      });
-    });
+    const r = await reapLurkerFirefox();
+    if (r.killed > 0) {
+      this.emit('warning', { msg: `Reaped lurker Firefox tree (${r.killed} process(es))` });
+    }
+    if (!r.clean) {
+      // remaining === -1 means the verify step couldn't run; remaining > 0 means
+      // some processes outlived the deadline. Either way the profile may still be
+      // locked — surface it loudly so the next-launch timeout isn't a mystery.
+      Logger.warn({ msg: 'Stale lurker Firefox did not fully die before launch', killed: r.killed, remaining: r.remaining });
+      this.emit('warning', { msg: `Warning: ${r.remaining < 0 ? 'unknown' : r.remaining} lurker Firefox process(es) may still hold the profile lock` });
+    }
   }
 }
 
