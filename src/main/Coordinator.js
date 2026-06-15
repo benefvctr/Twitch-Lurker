@@ -179,7 +179,7 @@ class Coordinator extends EventEmitter {
         try {
           this.emit('warning', { msg: 'Periodic 6h restart: recycling browser to prevent tab accumulation' });
           // Periodic restarts go through _handleBrowserCrash directly (not event path)
-          this._handleBrowserCrash();
+          this._handleBrowserCrash('periodic');
         } catch (e) {
           this.emit('lifecycle-error', { phase: 'periodic-restart', error: e.message });
         }
@@ -208,9 +208,14 @@ class Coordinator extends EventEmitter {
     }
   }
 
-  async stop() {
-    // BUG 4: mark that the user explicitly stopped so in-flight restarts abort
-    this._userStopped = true;
+  async stop({ userInitiated = true } = {}) {
+    // BUG 4: mark that the user explicitly stopped so in-flight restarts abort.
+    // CRITICAL: only a user-initiated stop sets this flag. The automatic restart
+    // path (_attemptRestart) calls stop({ userInitiated: false }) as its first
+    // step; if that internal stop set _userStopped, the very next _userStopped
+    // guard in _attemptRestart would abort the restart and the browser would
+    // never relaunch (the chronic "6h restart never comes back" bug).
+    if (userInitiated) this._userStopped = true;
     this.running = false;
     if (this._periodicRestartTimer) {
       clearInterval(this._periodicRestartTimer);
@@ -253,10 +258,10 @@ class Coordinator extends EventEmitter {
    * Only called when running=true and not user-stopped (callers check that).
    * Delegates to _attemptRestart which bypasses the running guard.
    */
-  _handleBrowserCrash() {
+  _handleBrowserCrash(reason = 'crash') {
     // Idempotent: only one restart sequence at a time
     if (this._restartInProgress) return;
-    this._attemptRestart();
+    this._attemptRestart(reason);
   }
 
   /**
@@ -265,18 +270,24 @@ class Coordinator extends EventEmitter {
    * call start() after that. Scheduled retries call this directly (not _handleBrowserCrash)
    * so they also bypass the running guard while still respecting _userStopped.
    */
-  async _attemptRestart() {
+  async _attemptRestart(reason = 'crash') {
     this._restartInProgress = true;
     try {
       // BUG 4: if user stopped while we were queued, abort
       if (this._userStopped) return;
 
-      this.emit('warning', { msg: 'Browser crashed; respawning' });
+      this.emit('warning', {
+        msg: reason === 'periodic'
+          ? 'Periodic restart: respawning browser'
+          : 'Browser crashed; respawning'
+      });
 
       // Stop watchdog first to prevent re-entrant crash events
       this.browser?.stopWatchdog?.();
 
-      await this.stop();
+      // userInitiated:false — this is our own teardown, not a user stop. Setting
+      // _userStopped here would make the guards below abort the relaunch.
+      await this.stop({ userInitiated: false });
 
       // BUG 4: check again after stop() which may have been called concurrently
       if (this._userStopped) return;
