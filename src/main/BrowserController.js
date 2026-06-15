@@ -4,10 +4,13 @@ const { EventEmitter } = require('events');
 const Logger = require('./Logger.js');
 const { reapLurkerFirefox } = require('./firefoxReaper.js');
 
-// Explicit launch timeout. Playwright's default is 180000ms; we raise it for
-// headroom + diagnostics, but the real cure for the chronic launch hang is the
-// process-tree reaper + lock verification — never this bump alone.
-const LAUNCH_TIMEOUT_MS = 300000;
+// Explicit launch timeout. Normal launches complete in ~2-4s (see the
+// elapsedMs logging below); v0.2.7 raised this to 300000ms for diagnostics, but
+// a 5-minute hang on a wedged launch is far worse than failing fast — now that
+// the auto-restart loop actually relaunches (v0.2.8), a quick failure lets
+// _attemptRestart escalate (plain -> reap -> reclone) instead of blocking the
+// app for five minutes. 90s is well beyond any healthy launch yet fails fast.
+const LAUNCH_TIMEOUT_MS = 90000;
 // Bound on context.close() so a hung close (common with many open tabs) can't
 // leave the old process holding the profile lock into the next launch.
 const CLOSE_TIMEOUT_MS = 10000;
@@ -81,11 +84,25 @@ foreach ($pid_ in $lurkerPids) {
     const launchStart = Date.now();
     // -no-remote is dropped from args: Playwright already passes it, and the
     // duplicate showed up twice on the launch command line.
-    this.context = await firefox.launchPersistentContext(this.profilePath, {
-      headless: false,
-      timeout: LAUNCH_TIMEOUT_MS,
-      env: { ...process.env, MOZ_DISABLE_CONTENT_SANDBOX: '1' }
-    });
+    try {
+      this.context = await firefox.launchPersistentContext(this.profilePath, {
+        headless: false,
+        timeout: LAUNCH_TIMEOUT_MS,
+        env: { ...process.env, MOZ_DISABLE_CONTENT_SANDBOX: '1' }
+      });
+    } catch (e) {
+      // A timed-out / failed launch can leave a half-started Firefox holding the
+      // profile lock, which would then wedge the NEXT attempt too. Reap the tree
+      // before rethrowing so the restart loop's next attempt starts clean.
+      Logger.warn({ msg: 'launchPersistentContext failed; reaping before rethrow', elapsedMs: Date.now() - launchStart, error: e.message });
+      try {
+        const r = await reapLurkerFirefox();
+        Logger.warn({ msg: 'reap after failed launch', killed: r.killed, remaining: r.remaining, clean: r.clean });
+      } catch (killErr) {
+        Logger.warn({ msg: 'reap after failed launch errored', error: killErr.message });
+      }
+      throw e;
+    }
     Logger.info({ msg: 'launchPersistentContext completed', elapsedMs: Date.now() - launchStart });
     // Seed Twitch's quality preference in localStorage BEFORE the page loads.
     // Twitch's player JS reads this on init and picks the right quality with no
