@@ -1,0 +1,65 @@
+name: Build Windows installer
+
+# Builds the packaged Windows (NSIS) installer the same way `npm run build` does
+# locally, so a testable .exe can be produced without a Windows dev machine.
+#
+# Triggers:
+#   - Manual run (workflow_dispatch): build whatever branch you pick in the UI.
+#     Use this to get a 0.2.8 build of the fix branch to a tester.
+#   - Tag push matching v* : build and attach the installer to a GitHub Release.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed only for the release step on tag pushes
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Populates %LOCALAPPDATA%\ms-playwright\firefox-1511, which the prebuild
+      # junction (scripts/link-playwright.js) and electron-builder.yml bundle as
+      # an extraResource. The firefox build number is pinned via playwright@1.59.1.
+      - name: Install Playwright Firefox
+        run: npx playwright install firefox
+
+      # Runs prebuild (link-playwright) -> vite build -> electron-builder --win.
+      - name: Build installer
+        run: npm run build
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TwitchLurker-windows-installer
+          path: |
+            dist/installer/*.exe
+            dist/installer/*.blockmap
+            dist/installer/latest.yml
+          if-no-files-found: error
+
+      # On a tag push, also publish the installer to a GitHub Release so testers
+      # can download it directly. Never blocks the artifact upload above.
+      - name: Publish release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          files: |
+            dist/installer/*.exe
+            dist/installer/*.blockmap
+            dist/installer/latest.yml
