@@ -1,0 +1,12 @@
+{
+  "name": "tarkov-quiz-seed",
+  "description": "Uploads questions.json into Firestore (server-side, using the Admin SDK)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "seed": "node seed-questions.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.6.0"
+  }
+}

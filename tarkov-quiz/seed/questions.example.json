@@ -1,0 +1,24 @@
+[
+  {
+    "n": 1,
+    "type": "text",
+    "prompt": "Which of these ammo types has the highest base penetration?",
+    "options": ["7.62x39 BP", "5.45x39 BS", "5.56x45 M995", "9x19 PST gzh"],
+    "correctIndex": 2
+  },
+  {
+    "n": 2,
+    "type": "image",
+    "prompt": "Which map is this extract from?",
+    "imageUrl": "https://your-project.web.app/question-images/q2.jpg",
+    "options": ["Customs", "Woods", "Shoreline", "Interchange"],
+    "correctIndex": 1
+  },
+  {
+    "n": 3,
+    "type": "text",
+    "prompt": "Which trader unlocks the Flea Market?",
+    "options": ["Therapist", "Ragman", "Skier", "None — it's level-gated"],
+    "correctIndex": 3
+  }
+]

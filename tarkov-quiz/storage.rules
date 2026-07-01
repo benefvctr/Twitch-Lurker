@@ -1,0 +1,14 @@
+rules_version = '2';
+// Question images are public to read (they're shown to every player) but only
+// you (via the Firebase Console / CLI) can upload them. No client writes.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /question-images/{image=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Questions (with correct answers) are NEVER exposed to clients.
+    // Only Cloud Functions (Admin SDK) can read/write them.
+    match /questions/{id} {
+      allow read, write: if false;
+    }
+
+    // Attempts hold in-flight answers/timers — clients must go through the
+    // callable functions, never touch these docs directly.
+    match /attempts/{uid} {
+      allow read, write: if false;
+    }
+
+    // OAuth CSRF state is server-only.
+    match /oauthStates/{state} {
+      allow read, write: if false;
+    }
+
+    // Leaderboard is public to READ (name + score), but only the server writes.
+    match /leaderboard/{uid} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}
