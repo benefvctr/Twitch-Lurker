@@ -1,0 +1,20 @@
+# Example client config — setup-server.sh prints a filled-in version of this
+# for you; you shouldn't need to write it by hand.
+#
+# Save as lowping.conf and import into the WireGuard app (Windows/macOS).
+
+[Interface]
+PrivateKey = <client-private-key>
+Address = 10.66.66.2/24
+
+[Peer]
+PublicKey = <server-public-key>
+Endpoint = <vps-public-ip>:51820
+
+# THE IMPORTANT PART — split tunneling.
+# Only traffic to these addresses goes through the relay. List your game
+# server IPs (or their whole datacenter range from `whois <ip>`).
+# Do NOT use 0.0.0.0/0 — that would route ALL your traffic through the VPS.
+AllowedIPs = 203.0.113.10/32, 198.51.100.0/24
+
+PersistentKeepalive = 25
